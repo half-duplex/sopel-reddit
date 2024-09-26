@@ -33,6 +33,7 @@ post_or_comment_url = (
     r'(?:/r/\S+?)?/comments/(?P<submission>[\w-]+)'
     r'(?:/?(?:[\w%]+/(?P<comment>[\w-]+))?)'
 )
+share_url = r'https?://(?:www\.)?reddit\.com/r/\S+?/s/\w+'
 short_post_url = r'https?://(redd\.it|reddit\.com)/(?P<submission>[\w-]+)/?$'
 user_url = r'%s/u(?:ser)?/([\w-]+)' % domain
 image_url = r'https?://(?P<subdomain>i|preview)\.redd\.it/(?:[\w%]+-)*(?P<image>[^-?\s]+)'
@@ -157,18 +158,35 @@ def video_info(bot, trigger, match):
     return say_post_info(bot, trigger, submission_id, False, True)
 
 
+@plugin.url(share_url)
+@plugin.output_prefix(PLUGIN_OUTPUT_PREFIX)
+def share_info(bot, trigger):
+    url = trigger.match.group(0)
+    if url.startswith("http:"):
+        url = "https:" + url[5:]
+    redirect_response = requests.get(
+        url, allow_redirects=False, headers={"User-Agent": USER_AGENT}
+    )
+    if redirect_response.status_code != 301:
+        return
+    real_url = redirect_response.headers["location"]
+    match = re.match(post_or_comment_url, real_url)
+    if match:
+        post_or_comment_info(bot, trigger, match, force_link=True)
+
+
 @plugin.url(post_or_comment_url)
 @plugin.url(short_post_url)
 @plugin.output_prefix(PLUGIN_OUTPUT_PREFIX)
-def post_or_comment_info(bot, trigger, match):
+def post_or_comment_info(bot, trigger, match, force_link=False):
     match = match or trigger
     groups = match.groupdict()
 
     if groups.get("comment"):
-        say_comment_info(bot, trigger, groups["comment"])
+        say_comment_info(bot, trigger, groups["comment"], show_link=force_link)
         return
 
-    say_post_info(bot, trigger, groups["submission"])
+    say_post_info(bot, trigger, groups["submission"], show_comments_link=force_link)
 
 
 @plugin.url(gallery_url)
@@ -260,7 +278,7 @@ def say_post_info(bot, trigger, id_, show_link=True, show_comments_link=False):
         return plugin.NOLIMIT
 
 
-def say_comment_info(bot, trigger, id_):
+def say_comment_info(bot, trigger, id_, show_link=False):
     try:
         c = bot.memory['reddit_praw'].comment(id_)
     except prawcore.exceptions.NotFound:
@@ -268,7 +286,7 @@ def say_comment_info(bot, trigger, id_):
         return plugin.NOLIMIT
 
     message = ('Comment by {author} | {points} {points_text} | '
-               'Posted at {posted} | {comment}')
+               'Posted at {posted} | {link}{comment}')
 
     if c.author:
         author = c.author.name
@@ -279,12 +297,20 @@ def say_comment_info(bot, trigger, id_):
 
     posted = get_time_created(bot, trigger, c.created_utc)
 
+    # DIY shortish-link, since c.permalink is both long and not a link
+    link = ""
+    if show_link:
+        link = "https://reddit.com/comments/{}/c/{} | ".format(
+            c.link_id[3:],  # strip t3_ prefix
+            c.id
+        )
+
     # stolen from the function I (dgw) wrote for our github plugin
     lines = [line for line in c.body.splitlines() if line and line[0] != '>']
 
     message = message.format(
         author=author, points=c.score, points_text=points_text,
-        posted=posted, comment=' '.join(lines))
+        posted=posted, link=link, comment=' '.join(lines))
 
     bot.say(message, truncation=' […]')
 
